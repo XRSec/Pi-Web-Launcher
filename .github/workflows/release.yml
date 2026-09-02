@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 1.0.1 or v1.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize version
+        id: version
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          version="${version#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: ${{ inputs.version }} (expected x.y.z or vx.y.z)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          INSTALL_APP: "0"
+        run: ./build-app.sh
+
+      - name: Verify architecture
+        shell: bash
+        run: |
+          binary="dist/Pi Web.app/Contents/MacOS/PiWeb"
+          actual="$(lipo -archs "$binary")"
+          if [[ "$actual" != "${{ matrix.arch }}" ]]; then
+            echo "Expected ${{ matrix.arch }}, got $actual" >&2
+            exit 1
+          fi
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          archive="Pi-Web-Launcher-v${VERSION}-macOS-${ARCH}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Pi Web.app" "$archive"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: Pi-Web-Launcher-v${{ steps.version.outputs.version }}-macOS-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "Missing repository secret: TOKEN_GITHUB" >&2
+            exit 1
+          fi
+
+          version="${VERSION_INPUT#v}"
+          tag="v${version}"
+
+          gh release create "$tag" release/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Pi Web Launcher $tag" \
+            --generate-notes
