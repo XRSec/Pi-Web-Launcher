@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupMainMenu()
         PiWebDefaults.register()
         setupStatusItem()
+        controller.checkForUpdates { [weak self] version, releaseURL in
+            self?.showUpdateAlert(version: version, releaseURL: releaseURL)
+        }
     }
 
     private func setupMainMenu() {
@@ -163,6 +166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.quit()
     }
 
+    private func showUpdateAlert(version: String, releaseURL: URL) {
+        let alert = NSAlert()
+        alert.messageText = "发现新版本 \(version)"
+        alert.informativeText = "Pi Web Launcher 有新版本可用，是否前往 GitHub Releases 下载？"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "前往下载")
+        alert.addButton(withTitle: "稍后")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(releaseURL)
+        }
+    }
+
     private func showSettingsWindow() {
         if let window = settingsWindowController?.window {
             window.makeKeyAndOrderFront(nil)
@@ -174,8 +190,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hostingController = NSHostingController(rootView: settingsView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Pi Web 设置"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 700, height: 760))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 700, height: 780))
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -203,6 +219,19 @@ private enum PiWebImages {
     }()
 }
 
+private struct RuntimeSettingsSnapshot: Equatable {
+    let hostname: String
+    let port: String
+    let allowedHosts: String
+    let workingDirectory: String
+    let nodeBinPath: String
+    let piWebPath: String
+    let environmentPath: String
+    let nodeOptions: String
+    let password: String
+    let customEnvironmentVariables: [EnvironmentVariable]
+}
+
 private struct SettingsView: View {
     @ObservedObject var controller: PiWebController
 
@@ -221,6 +250,7 @@ private struct SettingsView: View {
     @State private var customEnvironmentVariables = EnvironmentVariableStore.load()
     @State private var detectionMessage: String?
     @State private var availableIPs: [String] = []
+    @State private var appliedRuntimeSettings: RuntimeSettingsSnapshot?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -237,21 +267,33 @@ private struct SettingsView: View {
                 }
                 .padding(20)
             }
+            .frame(minHeight: 300)
+
+            Divider()
+            LogBoxView(logs: controller.logs)
 
             Divider()
             footer
         }
-        .frame(width: 700, height: 760)
+        .frame(minWidth: 700, minHeight: 680)
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear {
+            if appliedRuntimeSettings == nil {
+                appliedRuntimeSettings = currentRuntimeSettings
+            }
             availableIPs = getLocalIPAddresses()
-            if !availableIPs.contains(hostname) {
+            if !hostname.isEmpty && !availableIPs.contains(hostname) {
                 availableIPs.append(hostname)
+            } else if hostname.isEmpty && !availableIPs.isEmpty {
+                hostname = availableIPs.first!
             }
             bringToForegroundWhenOpen()
         }
         .onChange(of: customEnvironmentVariables) { newValue in
             EnvironmentVariableStore.save(newValue)
+        }
+        .onChange(of: controller.appliedConfigurationRevision) { _ in
+            appliedRuntimeSettings = currentRuntimeSettings
         }
     }
 
@@ -286,18 +328,31 @@ private struct SettingsView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
             .background(
-                Capsule().fill(Color.primary.opacity(0.06))
+                Capsule()
+                    .fill((controller.isRunning ? Color.green : Color.secondary).opacity(0.10))
             )
 
-            Button(action: {
-                controller.isRunning ? controller.openWeb() : controller.start()
-            }) {
-                Label(
-                    controller.isRunning ? "打开" : "启动",
-                    systemImage: controller.isRunning ? "arrow.up.forward.square" : "play.fill"
+            if hasPendingRuntimeChanges {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 5, height: 5)
+                    Text("有未应用修改")
+                        .font(.caption.weight(.medium))
+                }
+                .foregroundColor(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    Capsule().fill(Color.accentColor.opacity(0.09))
                 )
             }
-            .buttonStyle(ProminentButtonStyle())
+
+            if controller.isRunning {
+                Button(action: controller.openWeb) {
+                    Label("打开网页", systemImage: "arrow.up.forward.square")
+                }
+            }
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 18)
@@ -322,8 +377,10 @@ private struct SettingsView: View {
 
                     Button {
                         availableIPs = getLocalIPAddresses()
-                        if !availableIPs.contains(hostname) {
+                        if !hostname.isEmpty && !availableIPs.contains(hostname) {
                             availableIPs.append(hostname)
+                        } else if hostname.isEmpty && !availableIPs.isEmpty {
+                            hostname = availableIPs.first!
                         }
                     } label: {
                         Image(systemName: "arrow.clockwise")
@@ -499,23 +556,43 @@ private struct SettingsView: View {
             subtitle: controller.isRunning ? "Pi Web 服务正在运行" : "Pi Web 服务当前未运行",
             systemImage: controller.isRunning ? "checkmark.circle.fill" : "info.circle"
         ) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(controller.isRunning ? Color.green : Color.secondary)
-                    .frame(width: 8, height: 8)
-                Text(controller.statusText)
-                    .fontWeight(.medium)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill((controller.isRunning ? Color.green : Color.secondary).opacity(0.12))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: controller.isRunning ? "checkmark" : "pause.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(controller.isRunning ? .green : .secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(controller.statusText)
+                        .font(.callout.weight(.semibold))
+                    if controller.isRunning, !controller.runtimeURL.isEmpty {
+                        Text(controller.runtimeURL)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("启动后可在这里查看服务地址")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Spacer()
 
-                if controller.isRunning, !controller.runtimeURL.isEmpty {
-                    Text(controller.runtimeURL)
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundColor(.secondary)
+                if controller.isRunning {
+                    Button("打开网页", action: controller.openWeb)
                 }
             }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
+            )
 
             if let error = controller.lastError, !error.isEmpty {
-                SettingDivider()
                 Label {
                     Text(error)
                         .font(.system(.caption, design: .monospaced))
@@ -523,15 +600,27 @@ private struct SettingsView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
                 .foregroundColor(.red)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.red.opacity(0.07))
+                )
             }
         }
     }
 
     private var footer: some View {
-        HStack {
-            Text("设置自动保存。运行参数修改后需要重启服务才能生效。")
-                .font(.caption)
-                .foregroundColor(.secondary)
+        HStack(spacing: 12) {
+            if hasPendingRuntimeChanges {
+                Label("运行参数已修改，应用后生效", systemImage: "pencil.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(Color.accentColor)
+            } else {
+                Text("设置自动保存")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
 
             Spacer()
 
@@ -541,13 +630,45 @@ private struct SettingsView: View {
                 }
             }
 
-            Button(controller.isRunning ? "应用并重启" : "应用并启动") {
-                controller.restart()
+            Button(primaryActionTitle) {
+                if controller.isRunning || hasPendingRuntimeChanges {
+                    controller.restart()
+                } else {
+                    controller.start()
+                }
             }
             .buttonStyle(ProminentButtonStyle())
         }
         .padding(.horizontal, 22)
-        .padding(.vertical, 14)
+        .padding(.vertical, 13)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.72))
+    }
+
+    private var currentRuntimeSettings: RuntimeSettingsSnapshot {
+        RuntimeSettingsSnapshot(
+            hostname: hostname,
+            port: port,
+            allowedHosts: allowedHosts,
+            workingDirectory: workingDirectory,
+            nodeBinPath: nodeBinPath,
+            piWebPath: piWebPath,
+            environmentPath: environmentPath,
+            nodeOptions: nodeOptions,
+            password: password,
+            customEnvironmentVariables: customEnvironmentVariables
+        )
+    }
+
+    private var hasPendingRuntimeChanges: Bool {
+        guard let appliedRuntimeSettings else { return false }
+        return appliedRuntimeSettings != currentRuntimeSettings
+    }
+
+    private var primaryActionTitle: String {
+        if hasPendingRuntimeChanges {
+            return controller.isRunning ? "应用并重启" : "应用并启动"
+        }
+        return controller.isRunning ? "重启" : "启动"
     }
 
     private func detectEnvironmentPath() {
@@ -609,17 +730,65 @@ private struct SettingsView: View {
     }
 }
 
+private struct LogBoxView: View {
+    var logs: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color.accentColor)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.10))
+                    )
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("运行日志")
+                        .font(.callout.weight(.semibold))
+                    Text(logs.isEmpty ? "服务启动后将在这里显示输出" : "Pi Web 实时输出")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            ScrollView {
+                Text(logs.isEmpty ? "暂无日志输出" : logs)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(logs.isEmpty ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color(NSColor.textBackgroundColor).opacity(0.78))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .frame(height: 170)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.42))
+    }
+}
+
 private struct ProminentButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.accentColor.opacity(configuration.isPressed ? 0.8 : 1.0))
-            )
+            .font(.callout.weight(.semibold))
             .foregroundColor(.white)
-            .font(.callout.weight(.medium))
+            .padding(.horizontal, 15)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.accentColor.opacity(configuration.isPressed ? 0.82 : 1.0))
+            )
+            .shadow(color: Color.black.opacity(configuration.isPressed ? 0.02 : 0.08), radius: 3, y: 1)
     }
 }
 
@@ -642,15 +811,15 @@ private struct SettingsCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 11) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(Color.accentColor)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 30, height: 30)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.1))
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.10))
                     )
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -664,16 +833,17 @@ private struct SettingsCard<Content: View>: View {
 
             content
         }
-        .padding(16)
+        .padding(17)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(NSColor.controlBackgroundColor))
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.82))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.primary.opacity(0.065), lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(0.025), radius: 5, y: 2)
     }
 }
 
@@ -700,6 +870,7 @@ private struct SettingRow<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             content
+                .frame(width: 310, alignment: .leading)
         }
     }
 }
@@ -727,6 +898,7 @@ private struct EnvironmentRow<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             content
+                .frame(width: 310, alignment: .leading)
         }
     }
 }

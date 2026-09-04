@@ -1,12 +1,24 @@
 import AppKit
 import Foundation
 
+private struct GitHubRelease: Decodable {
+    let tagName: String
+    let htmlURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case htmlURL = "html_url"
+    }
+}
+
 @MainActor
 final class PiWebController: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var statusText = "已停止"
     @Published private(set) var lastError: String?
     @Published private(set) var runtimeURL = ""
+    @Published private(set) var logs = ""
+    @Published private(set) var appliedConfigurationRevision = 0
 
     private var process: Process?
     private var outputPipe: Pipe?
@@ -34,6 +46,7 @@ final class PiWebController: ObservableObject {
         do {
             lastError = nil
             statusText = "正在启动…"
+            appendLogLine("[服务] 正在启动 Pi Web")
 
             let config = try LaunchConfiguration.current()
             try requireLocalAddress(config.hostname)
@@ -83,6 +96,7 @@ final class PiWebController: ObservableObject {
             isRunning = true
             statusText = "运行中"
             runtimeURL = config.webURLString
+            appliedConfigurationRevision += 1
 
             if config.openBrowserOnStart {
                 let pid = child.processIdentifier
@@ -124,6 +138,60 @@ final class PiWebController: ObservableObject {
         start()
     }
 
+    func checkForUpdates(onUpdate: @escaping (String, URL) -> Void) {
+        guard let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              !currentVersion.isEmpty else {
+            appendLogLine("[更新] 检查失败：无法读取当前应用版本")
+            return
+        }
+
+        guard let url = URL(string: "https://api.github.com/repos/XRSec/Pi-Web-Launcher/releases/latest") else {
+            appendLogLine("[更新] 检查失败：GitHub Releases 地址无效")
+            return
+        }
+
+        appendLogLine("[更新] 正在检查 GitHub Releases…")
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Pi-Web-Launcher", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+
+                if let error {
+                    self.appendLogLine("[更新] 检查失败：\(error.localizedDescription)")
+                    return
+                }
+
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200..<300).contains(httpResponse.statusCode),
+                      let data else {
+                    let status = (response as? HTTPURLResponse)?.statusCode
+                    self.appendLogLine("[更新] 检查失败：GitHub 返回状态 \(status.map(String.init) ?? "未知")")
+                    return
+                }
+
+                do {
+                    let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+                    let latestVersion = self.normalizedVersion(release.tagName)
+                    let installedVersion = self.normalizedVersion(currentVersion)
+
+                    if latestVersion.compare(installedVersion, options: .numeric) == .orderedDescending {
+                        self.appendLogLine("[更新] 发现新版本 \(release.tagName)，当前版本 v\(installedVersion)")
+                        onUpdate(release.tagName, release.htmlURL)
+                    } else {
+                        self.appendLogLine("[更新] 当前已是最新版本 v\(installedVersion)")
+                    }
+                } catch {
+                    self.appendLogLine("[更新] 检查失败：无法解析 GitHub Release（\(error.localizedDescription)）")
+                }
+            }
+        }.resume()
+    }
+
     func openWeb() {
         let target: String
         if !runtimeURL.isEmpty {
@@ -144,12 +212,27 @@ final class PiWebController: ObservableObject {
     }
 
     private func consumeOutput(_ text: String) {
+        logs += text
+
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         if trimmed.localizedCaseInsensitiveContains("error") || trimmed.localizedCaseInsensitiveContains("failed") {
             lastError = trimmed
         }
+    }
+
+    private func appendLogLine(_ text: String) {
+        if !logs.isEmpty && !logs.hasSuffix("\n") {
+            logs += "\n"
+        }
+        logs += text + "\n"
+    }
+
+    private func normalizedVersion(_ version: String) -> String {
+        let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "v" || first == "V" else { return trimmed }
+        return String(trimmed.dropFirst())
     }
 
     private func finishStoppedState(message: String) {
@@ -166,6 +249,8 @@ final class PiWebController: ObservableObject {
     }
 
     private func requireLocalAddress(_ address: String) throws {
+        guard address != "0.0.0.0" else { return }
+
         let result = try runProcess(executable: "/sbin/ifconfig", arguments: [])
         guard result.status == 0 else {
             throw PiWebError.message("无法读取本机网络接口")
@@ -323,7 +408,9 @@ final class PiWebController: ObservableObject {
         done
 
         pi_web_pids=(${(u)pi_web_pids[@]})
-        (( ${#pi_web_pids[@]} )) || exit 0
+        if (( ${#pi_web_pids[@]} == 0 )); then
+          exit 2
+        fi
 
         kill "${pi_web_pids[@]}" 2>/dev/null || true
         managed_pids=(${(u)pi_web_pids[@]} ${(u)listener_pids[@]})
@@ -345,6 +432,9 @@ final class PiWebController: ObservableObject {
             executable: "/bin/zsh",
             arguments: ["-c", script, "pi-web-stop", String(port)]
         )
+        if result.status == 2 {
+            throw PiWebError.message("端口 \(port) 已被其他程序占用，请在设置中更换端口")
+        }
         guard result.status == 0 else {
             throw PiWebError.message("无法停止端口 \(port) 上已有的 pi-web")
         }

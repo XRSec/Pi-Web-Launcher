@@ -7,8 +7,9 @@ func getLocalIPAddresses() -> [String] {
     guard let firstAddr = ifaddr else { return addresses }
     
     for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+        guard let ifaAddr = ptr.pointee.ifa_addr else { continue }
         let flags = Int32(ptr.pointee.ifa_flags)
-        let addr = ptr.pointee.ifa_addr.pointee
+        let addr = ifaAddr.pointee
         
         // UP and RUNNING. We can include LOOPBACK if we want (127.0.0.1 is already in).
         if (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING) {

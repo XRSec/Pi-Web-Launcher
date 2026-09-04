@@ -19,7 +19,7 @@ enum PiWebDefaults {
     static let hostname = "127.0.0.1"
     static let port = "30141"
     static let allowedHosts = ""
-    static let workingDirectory = "~"
+    static let workingDirectory = "~/.pi"
     static let nodeBinPath = ""
     static let piWebPath = ""
     static var environmentPath: String {
@@ -94,7 +94,10 @@ struct LaunchConfiguration {
 
     static func current() throws -> LaunchConfiguration {
         let defaults = UserDefaults.standard
-        let hostname = defaults.string(forKey: SettingsKeys.hostname)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var hostname = defaults.string(forKey: SettingsKeys.hostname)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if hostname.isEmpty {
+            hostname = PiWebDefaults.hostname
+        }
         let portText = defaults.string(forKey: SettingsKeys.port)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let allowedHosts = defaults.string(forKey: SettingsKeys.allowedHosts)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let password = defaults.string(forKey: SettingsKeys.password) ?? ""

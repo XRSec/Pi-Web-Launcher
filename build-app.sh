@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${0:A:h}"
 APP_NAME="Pi Web"
-APP_VERSION="${APP_VERSION:-1.0.0}"
+APP_VERSION="${APP_VERSION:-1.0.1}"
 DIST_DIR="$ROOT/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 ICON_SOURCE="$ROOT/Resources/PiWeb.icns"
@@ -55,6 +55,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Pi Web 需要访问您的下载文件夹以运行相关服务和读写文件。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Pi Web 需要访问您的文稿文件夹以运行相关服务和读写文件。</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Pi Web 需要访问您的桌面文件夹以运行相关服务和读写文件。</string>
 </dict>
 </plist>
 PLIST
