@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="${0:A:h}"
 APP_NAME="Pi Web"
-APP_VERSION="${APP_VERSION:-1.0.1}"
+APP_VERSION="${APP_VERSION:-1.0.2}"
 DIST_DIR="$ROOT/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 ICON_SOURCE="$ROOT/Resources/PiWeb.icns"

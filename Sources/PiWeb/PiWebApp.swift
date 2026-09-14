@@ -182,24 +182,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showSettingsWindow() {
         if let window = settingsWindowController?.window {
             window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
         let settingsView = SettingsView(controller: controller)
         let hostingController = NSHostingController(rootView: settingsView)
-        let window = NSWindow(contentViewController: hostingController)
+        let window = SettingsWindow(contentViewController: hostingController)
         window.title = "Pi Web 设置"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 700, height: 780))
         window.center()
         window.isReleasedWhenClosed = false
+        window.initialFirstResponder = nil
 
         let windowController = NSWindowController(window: window)
         self.settingsWindowController = windowController
 
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+final class SettingsWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown {
+            if let currentResponder = self.firstResponder as? NSView {
+                let location = event.locationInWindow
+                let hitView = self.contentView?.hitTest(location)
+
+                let isInsideCurrent = (hitView == currentResponder) || (hitView?.isDescendant(of: currentResponder) ?? false)
+                if !isInsideCurrent {
+                    let isTargetEditable = (hitView is NSTextField) || ((hitView as? NSTextView)?.isEditable == true)
+                    if !isTargetEditable {
+                        self.makeFirstResponder(nil)
+                    }
+                }
+            }
+        }
+        super.sendEvent(event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if (self.firstResponder is NSTextField) || ((self.firstResponder as? NSTextView)?.isEditable == true) {
+            self.makeFirstResponder(nil)
+            return
+        }
+        super.cancelOperation(sender)
     }
 }
 
@@ -259,24 +290,28 @@ private struct SettingsView: View {
 
             ScrollView {
                 VStack(spacing: 16) {
+                    statusCard
                     serviceCard
                     runtimeCard
                     environmentCard
                     launchCard
-                    statusCard
                 }
                 .padding(20)
             }
             .frame(minHeight: 300)
 
             Divider()
-            LogBoxView(logs: controller.logs)
+            LogBoxView()
 
             Divider()
             footer
         }
         .frame(minWidth: 700, minHeight: 680)
         .background(Color(NSColor.windowBackgroundColor))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            NSApp.keyWindow?.makeFirstResponder(nil)
+        }
         .onAppear {
             if appliedRuntimeSettings == nil {
                 appliedRuntimeSettings = currentRuntimeSettings
@@ -288,6 +323,9 @@ private struct SettingsView: View {
                 hostname = availableIPs.first!
             }
             bringToForegroundWhenOpen()
+            DispatchQueue.main.async {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            }
         }
         .onChange(of: customEnvironmentVariables) { newValue in
             EnvironmentVariableStore.save(newValue)
@@ -392,7 +430,7 @@ private struct SettingsView: View {
 
             SettingDivider()
 
-            SettingRow(title: "端口", subtitle: "Pi Web 服务端口") {
+            SettingRow(title: "端口", subtitle: "Pi Web 服务端口，留空默认 30141") {
                 TextField("30141", text: $port)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .frame(width: 310)
@@ -645,9 +683,13 @@ private struct SettingsView: View {
     }
 
     private var currentRuntimeSettings: RuntimeSettingsSnapshot {
-        RuntimeSettingsSnapshot(
+        let effectivePort = port.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? PiWebDefaults.port
+            : port.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return RuntimeSettingsSnapshot(
             hostname: hostname,
-            port: port,
+            port: effectivePort,
             allowedHosts: allowedHosts,
             workingDirectory: workingDirectory,
             nodeBinPath: nodeBinPath,
@@ -706,6 +748,7 @@ private struct SettingsView: View {
             let settingsWindow = NSApp.windows.last { $0.canBecomeKey }
             settingsWindow?.makeKeyAndOrderFront(nil)
             settingsWindow?.orderFrontRegardless()
+            settingsWindow?.makeFirstResponder(nil)
         }
     }
 
@@ -731,10 +774,11 @@ private struct SettingsView: View {
 }
 
 private struct LogBoxView: View {
-    var logs: String
+    @ObservedObject private var logStore = LogStore.shared
+    @State private var autoScroll = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 9) {
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 12, weight: .semibold))
@@ -746,33 +790,50 @@ private struct LogBoxView: View {
                     )
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("运行日志")
+                    Text("服务运行日志")
                         .font(.callout.weight(.semibold))
-                    Text(logs.isEmpty ? "服务启动后将在这里显示输出" : "Pi Web 实时输出")
+                    Text("Pi Web 实时控制台输出")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    if logStore.lineCount > 0 {
+                        Text("\(logStore.lineCount) 行 · \(logStore.logSizeFormatted)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+
+                    Toggle(isOn: $autoScroll) {
+                        Text("自动滚动")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .toggleStyle(CheckboxToggleStyle())
+
+                    Button {
+                        logStore.clear()
+                    } label: {
+                        Label("清空", systemImage: "trash")
+                            .font(.caption)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                    .help("清空当前控制台日志")
+                }
             }
 
-            ScrollView {
-                Text(logs.isEmpty ? "暂无日志输出" : logs)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(logs.isEmpty ? .secondary : .primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color(NSColor.textBackgroundColor).opacity(0.78))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .frame(height: 170)
+            ConsoleTextView(autoScroll: $autoScroll)
+                .frame(height: 190)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 13)
+        .padding(.vertical, 12)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.42))
     }
 }

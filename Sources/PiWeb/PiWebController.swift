@@ -17,7 +17,6 @@ final class PiWebController: ObservableObject {
     @Published private(set) var statusText = "已停止"
     @Published private(set) var lastError: String?
     @Published private(set) var runtimeURL = ""
-    @Published private(set) var logs = ""
     @Published private(set) var appliedConfigurationRevision = 0
 
     private var process: Process?
@@ -76,9 +75,7 @@ final class PiWebController: ObservableObject {
             pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                DispatchQueue.main.async {
-                    self?.consumeOutput(text)
-                }
+                self?.consumeOutput(text)
             }
             child.standardOutput = pipe
             child.standardError = pipe
@@ -211,22 +208,21 @@ final class PiWebController: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
-    private func consumeOutput(_ text: String) {
-        logs += text
+    nonisolated private func consumeOutput(_ text: String) {
+        LogStore.shared.append(text)
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         if trimmed.localizedCaseInsensitiveContains("error") || trimmed.localizedCaseInsensitiveContains("failed") {
-            lastError = trimmed
+            DispatchQueue.main.async { [weak self] in
+                self?.lastError = trimmed
+            }
         }
     }
 
     private func appendLogLine(_ text: String) {
-        if !logs.isEmpty && !logs.hasSuffix("\n") {
-            logs += "\n"
-        }
-        logs += text + "\n"
+        LogStore.shared.appendLine(text)
     }
 
     private func normalizedVersion(_ version: String) -> String {

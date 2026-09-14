@@ -1,10 +1,13 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 1.0.1 or v1.0.1"
+        description: "Release version, e.g. 1.0.2 or v1.0.2"
         required: true
         type: string
 
@@ -31,10 +34,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          version="${{ inputs.version }}"
-          version="${version#v}"
+          raw_version="${{ inputs.version || github.ref_name }}"
+          version="${raw_version#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version: ${{ inputs.version }} (expected x.y.z or vx.y.z)" >&2
+            echo "Invalid version: $raw_version (expected x.y.z or vx.y.z)" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -89,7 +92,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.TOKEN_GITHUB }}
-          VERSION_INPUT: ${{ inputs.version }}
+          VERSION_INPUT: ${{ inputs.version || github.ref_name }}
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
             echo "Missing repository secret: TOKEN_GITHUB" >&2

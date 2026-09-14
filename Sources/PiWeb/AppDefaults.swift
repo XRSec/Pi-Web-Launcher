@@ -110,8 +110,14 @@ struct LaunchConfiguration {
         guard !hostname.isEmpty else {
             throw PiWebError.message("监听 IP 不能为空")
         }
-        guard let port = Int(portText), (1...65535).contains(port) else {
-            throw PiWebError.message("端口必须是 1–65535 之间的整数")
+        let port: Int
+        if portText.isEmpty {
+            port = Int(PiWebDefaults.port) ?? 30141
+        } else {
+            guard let parsedPort = Int(portText), (1...65535).contains(parsedPort) else {
+                throw PiWebError.message("端口必须是 1–65535 之间的整数（留空默认 30141）")
+            }
+            port = parsedPort
         }
         guard !workingDirectory.isEmpty else {
             throw PiWebError.message("工作目录不能为空")
